@@ -5,6 +5,7 @@ import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.file
+import com.google.gson.Gson
 import com.google.gson.JsonObject
 import fr.tsodev.DiscoveryImport.models.Import
 import fr.tsodev.DiscoveryImport.models.ItemX
@@ -43,13 +44,13 @@ class DiscoveryImport: CliktCommand(help = "Ecrit des données dans BMC Discover
                 "généralement https://server/api/v1.1/"
     )
         .required()
-        .validate {
-            if (!it.matches(Regex(validURL)))
-                throw UsageError(
-                    "URL du serveur invalide : $it \n" +
-                            "lancer le programme avec l'option -h pour de l'aide"
-                )
-        }
+//        .validate {
+//            if (!it.matches(Regex(validURL)))
+//                throw UsageError(
+//                    "URL du serveur invalide : $it \n" +
+//                            "lancer le programme avec l'option -h pour de l'aide"
+//                )
+//        }
 
     val username: String by option(
         "-u", "--username",
@@ -126,94 +127,13 @@ class DiscoveryImport: CliktCommand(help = "Ecrit des données dans BMC Discover
         }
 
         if (generate) {
-            logger.info("Demande de génération du fichier modèle")
 
             path?.let { generateByCoroutines(username, password, server, it,  unsafe) }
 
 
         } else {
 
-            val inputStream = path?.name?.let { File(it).inputStream() }
-            val workbook = WorkbookFactory.create(inputStream)
-            val sheetIterator = workbook.sheetIterator()
-            val sheets: MutableList<IndexedValue<org.apache.poi.ss.usermodel.Sheet>> = mutableListOf()
-
-            sheetIterator.withIndex().forEach { sheet ->
-                sheets.add(sheet)
-            }
-
-            if (!sheets.isNotEmpty()) throw PrintMessage("Le fichier excel ne peut pas etre vide", -1, true)
-
-    //        val newKinds = sheets.filter { (it.value.sheetName.uppercase(Locale.getDefault())) == kindTabName }
-            val newKinds = sheets.filter { it.index == 0 }
-
-            val newItems = mutableListOf<JsonObject>()
-            val newItem = JsonObject()
-            val newItemData = mutableListOf<ItemX>()
-            if (newKinds.isEmpty())
-                throw PrintMessage(
-                    "Erreur : Le premier onglet du fichier excel doit contenir la liste des noeuds à importer",
-                    -5,
-                    true
-                )
-            else {
-                logger.debug("Kinds : $newKinds,  ${sheets.get(newKinds.first().index)}")
-                val kindSheet = sheets.get(newKinds.first().index).value
-                logger.debug("Kind Sheet : $kindSheet , ${kindSheet.header}")
-                val rowIterator = kindSheet.rowIterator()
-                val attrs = mutableListOf<String>()
-                rowIterator.forEach { row ->
-                    var importedData = JsonObject()
-                    val cellIterator = row.cellIterator().withIndex()
-                    if (row.rowNum == 0) {                                  // First Row is Header Row with attribute names
-//                    cellIterator.next()                                 // First Column is Kind name
-                        cellIterator.forEach { cell ->
-                            attrs.add(cell.value.stringCellValue)
-                        }
-                    } else {
-                        when (row.rowNum) {
-                            1 -> {}                                         // row is type
-                            2 -> {}                                         // Description
-                            3 -> {}                                         //
-                            else -> {
-                                cellIterator.forEach { cell ->
-                                    val dataValue: Any? = cellValueByType(cell.value)
-                                    importedData.addProperty(attrs.get(cell.index), dataValue)
-                                }
-                                val kind = newKinds.first().value.sheetName
-                                if (kind != null) {
-                                    logger.debug("ImportedData : row[${row.rowNum}] -> $importedData")
-                                    newItemData.add(ItemX(importedData, kind.toString()))
-                            }
-                        }
-
-                        }
-                    } // if not null
-
-                } // row iterator
-
-                newItem.addProperty("items", newItemData)
-                newItems.add(newItem)
-                logger.debug("Import : $newItems")
-
-            }
-
-
-            val uuid = UUID.randomUUID()
-
-            apiCallByCoroutines(
-                username = username,
-                password = password,
-                server = server,
-                Import(
-                    complete = true,
-                    items = newItemData,
-                    source = sourceName,
-                    type = typeName,
-                    uuid = uuid.toString()
-                ),
-                unsafe = unsafe
-            )
+            apiCallByCoroutines(username = username, password = password, server = server, unsafe = unsafe)
         }
 
     }
@@ -251,10 +171,79 @@ private fun apiCallByCoroutines(
     username: String,
     password: String,
     server: String,
-    items: Import,
     unsafe: Boolean
 ) = runBlocking {
     launch { // launch new coroutine in the scope of runBlocking
+
+
+        val inputStream = path?.name?.let { File(it).inputStream() }
+        val workbook = WorkbookFactory.create(inputStream)
+        val sheetIterator = workbook.sheetIterator()
+        val sheets: MutableList<IndexedValue<org.apache.poi.ss.usermodel.Sheet>> = mutableListOf()
+
+        if (! sheetIterator.hasNext()) throw PrintMessage("Le fichier excel ne peut pas etre vide", -1, true)
+
+        val newItemData = mutableListOf<ItemX>()
+        val newItems = mutableListOf<JsonObject>()
+
+        sheetIterator.forEach { sheet ->
+
+
+            val newItem = JsonObject()
+
+            logger.debug("Kind Sheet : $sheet , ${sheet.header}")
+            val rowIterator = sheet.rowIterator()
+            val attrs = mutableListOf<String>()
+            rowIterator.forEach { row ->
+                var importedData = JsonObject()
+                val cellIterator = row.cellIterator().withIndex()
+                when (row.rowNum) {
+                    0 ->                                   // First Row is Header Row with attribute names
+                        cellIterator.forEach { cell -> attrs.add(cell.value.stringCellValue) }
+                    1 -> {}                                         // row is type
+                    2 -> {}                                         // Description
+                    3 -> {}                                         //
+                    else -> {
+//                        cellIterator.forEach { cell ->
+                        for (i in 0 until row.lastCellNum) {
+                            val cell = row.getCell(i, Row.MissingCellPolicy.CREATE_NULL_AS_BLANK)
+
+                            val dataValue: Any? = cellValueByType(cell)
+                            if (( dataValue.toString() != ""))
+                                importedData.addProperty(attrs[i], dataValue)
+                            logger.debug("Cell -> ${i} $dataValue")
+
+                        }
+                        val kind = sheet.sheetName
+                        if (kind != null) {
+                            logger.debug("ImportedData : row[${row.rowNum}] -> $importedData")
+                            newItemData.add(ItemX(importedData, kind.toString()))
+                        }
+                    }
+
+                }
+
+            } // row iterator
+
+            newItem.addProperty("items", newItemData)
+            newItems.add(newItem)
+            logger.debug("Import : $newItemData")
+
+//            val gson = Gson()
+//            val json = gson.toJson(newItems)
+//            logger.debug("JSON : ${json.toString()}")
+
+        }
+
+        val import = Import(
+                    complete = true,
+                    items = newItemData,
+                    source = sourceName,
+                    type = typeName,
+                    uuid = UUID.randomUUID().toString()
+                )
+
+
 
         try {
             ServiceApi.apiGetToken(server, username, password, unsafe).let { token: String? ->
@@ -349,70 +338,73 @@ private fun apiCallByCoroutines(
                 ServiceApi.apiGetToken(server, username, password, unsafe).let { token: String? ->
                     if (token != null) {
                         TokenHolder.saveToken(token)
-                    ServiceApi.apiGetNodeKinds(server,section = "inferred", unsafe).let { result ->
-                        if (result != null) {
-                            nodeKinds = result.sortedBy { it.name }
-                        }
-                        logger.info("Récupération taxonomy des noeuds et création des onglets excel")
-                        nodeKinds.forEach { nodeKind ->
-
-                            ServiceApi.apiGetKindAttributeList(server, nodeKind.name, unsafe).let { attrList ->
-                                if (attrList != null) {
-                                    if (attrList.attrs.isNotEmpty()) {
-                                        val worksheet = workbook.createSheet(nodeKind.name)
-                                        val rowZero = worksheet.createRow(0)
-                                        val rowOne = worksheet.createRow(1)
-                                        val rowTwo = worksheet.createRow(2)
-                                        val rowThree = worksheet.createRow(3)
-                                        val rowFour = worksheet.createRow(4)
-                                        attributes.add(Pair(nodeKind.name.uppercase(), attrList!!))
-                                        var i = 0
-
-                                        attrList.attrs.forEachIndexed { index, attr ->
-                                            val cZero = rowZero.createCell(i)
-                                            val cOne = rowOne.createCell(i)
-                                            val cTwo = rowTwo.createCell(i)
-                                            val cThree = rowThree.createCell(i)
-                                            val cFour = rowFour.createCell(i)
-
-                                            cZero.setCellStyle(cs0)
-                                            cOne.setCellStyle(cs1)
-                                            cTwo.setCellStyle(cs2)
-                                            cThree.setCellStyle(cs3)
-                                            if (i == 0) cThree.setCellValue("vvvvvv - Commencer la liste des données à importer à la rangée 5 - vvvvv")
-
-                                            cZero.setCellValue(attr.name)
-                                            cOne.setCellValue("(${attr.type})")
-                                            cTwo.setCellValue(attr.description)
-                                            when (attr.type.uppercase()) {
-                                                "STRING" ->  cFour.cellType = CellType.STRING
-                                                "INT" -> cFour.cellType = CellType.NUMERIC
-                                                "BOOLEAN" -> cFour.cellType = CellType.BOOLEAN
-                                                "DATE" -> {
-                                                    cFour.cellType = CellType.STRING
-                                                }
-                                                "DICTIONARY"-> cFour.cellType = CellType.STRING
-                                                "LIST:STRING" -> cFour.cellType = CellType.STRING
-                                                "LIST:INT" -> cFour.cellType = CellType.STRING
-                                                "FLOAT" -> cFour.cellType = CellType.NUMERIC
-                                                else -> logger.debug ("Type ${attr.type} n'est pas pris en compte")
-                                            }
-
-                                            worksheet.setColumnWidth(i, 20 * 256)
-                                            i += 1
-                                        }
-                                        logger.info(".", false)
-                                    }
+                            ServiceApi.apiGetNodeKinds(server,section = "inferred", unsafe).let { result ->
+                                if (result != null) {
+                                    nodeKinds = result.sortedBy { it.name }
                                 }
-                            }
+                                logger.info("Récupération taxonomy des noeuds et création des onglets excel")
+                                nodeKinds.forEach { nodeKind ->
 
-                        }
-                        logger.info("")
-                        workbook.write(outputStream)
-                        workbook.close()
-                        logger.info("Le fichier modèle est crée $path")
-                        logger.info("vous pouver en faire une copie, le completer avec les noeuds à importer et relancer le programme")
-                    }
+                                    ServiceApi.apiGetKindAttributeList(server, nodeKind.name, unsafe).let { attrList ->
+                                        if (attrList != null) {
+                                            if (attrList.attrs.isNotEmpty()) {
+                                                val worksheet = workbook.createSheet(nodeKind.name)
+                                                val rowZero = worksheet.createRow(0)
+                                                val rowOne = worksheet.createRow(1)
+                                                val rowTwo = worksheet.createRow(2)
+                                                val rowThree = worksheet.createRow(3)
+                                                val rowFour = worksheet.createRow(4)
+   //                                             attributes.add(Pair(nodeKind.name.uppercase(), attrList!!))
+                                                var i = 0
+
+                                                attrList.attrs.forEachIndexed { index, attr ->
+                                                    if (!attr.name.startsWith('_')) {
+                                                        val cZero = rowZero.createCell(i)
+                                                        val cOne = rowOne.createCell(i)
+                                                        val cTwo = rowTwo.createCell(i)
+                                                        val cThree = rowThree.createCell(i)
+                                                        val cFour = rowFour.createCell(i)
+
+                                                        cZero.setCellStyle(cs0)
+                                                        cOne.setCellStyle(cs1)
+                                                        cTwo.setCellStyle(cs2)
+                                                        cThree.setCellStyle(cs3)
+                                                        if (i == 0) cThree.setCellValue("vvvvvv - Commencer la liste des données à importer à la rangée 5 - vvvvv")
+
+                                                        cZero.setCellValue(attr.name)
+                                                        cOne.setCellValue("(${attr.type})")
+                                                        cTwo.setCellValue(attr.description)
+                                                        when (attr.type.uppercase()) {
+                                                            "STRING" -> cFour.cellType = CellType.STRING
+                                                            "INT" -> cFour.cellType = CellType.NUMERIC
+                                                            "BOOLEAN" -> cFour.cellType = CellType.BOOLEAN
+                                                            "DATE" -> {
+                                                                cFour.cellType = CellType.STRING
+                                                            }
+
+                                                            "DICTIONARY" -> cFour.cellType = CellType.STRING
+                                                            "LIST:STRING" -> cFour.cellType = CellType.STRING
+                                                            "LIST:INT" -> cFour.cellType = CellType.STRING
+                                                            "FLOAT" -> cFour.cellType = CellType.NUMERIC
+                                                            else -> logger.debug("Type ${attr.type} n'est pas pris en compte")
+                                                        }
+
+                                                        worksheet.setColumnWidth(i, 20 * 256)
+                                                        i += 1
+                                                    }
+                                                }
+                                                logger.info(".", false)
+                                            }
+                                        }
+                                    }
+
+                                }
+                                logger.info("")
+                                workbook.write(outputStream)
+                                workbook.close()
+                                logger.info("Le fichier modèle est crée $path")
+                                logger.info("vous pouvez en extraire un ou plusieurs onglets, le(s) copier dans un fichier excel pour completer avec les noeuds à importer et relancer le programme")
+                            }
                     }
                 }
             } catch (exception: HttpException) {
